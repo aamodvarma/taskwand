@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext HTTP to Tailscale addresses (100.x.y.z) -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">100.64.0.0/10</domain>
+    </domain-config>
+    <!-- Permit all cleartext for any server URL the user configures (Tailscale VPN encrypts at transport layer) -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

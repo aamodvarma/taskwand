@@ -1,0 +1,20 @@
+[package]
+name = "rust_lib_taskwand"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.12.0"
+taskchampion = { version = "3.1.0", default-features = false, features = ["storage-sqlite", "bundled", "server-sync", "tls-webpki-roots"] }
+tokio = { version = "1", features = ["sync"] }
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
