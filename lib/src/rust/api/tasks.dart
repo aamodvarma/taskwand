@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_project`, `status_str`
+// These functions are ignored because they are not marked as `pub`: `apply_project`, `due_timestamp`, `status_str`
 
 Future<void> openReplica({required String dir}) =>
     RustLib.instance.api.crateApiTasksOpenReplica(dir: dir);
@@ -23,10 +23,12 @@ Future<void> addTask({
   required String description,
   String? project,
   PlatformInt64? dueUnix,
+  int? dueTimeMinutes,
 }) => RustLib.instance.api.crateApiTasksAddTask(
   description: description,
   project: project,
   dueUnix: dueUnix,
+  dueTimeMinutes: dueTimeMinutes,
 );
 
 /// Edit an existing task's description, project, and due date. A `None` project or
@@ -36,11 +38,13 @@ Future<void> modifyTask({
   required String description,
   String? project,
   PlatformInt64? dueUnix,
+  int? dueTimeMinutes,
 }) => RustLib.instance.api.crateApiTasksModifyTask(
   uuid: uuid,
   description: description,
   project: project,
   dueUnix: dueUnix,
+  dueTimeMinutes: dueTimeMinutes,
 );
 
 Future<void> completeTask({required String uuid}) =>
@@ -72,12 +76,17 @@ class TaskSummary {
   /// "pending" or "completed". Deleted/recurring/unknown tasks are never returned.
   final String status;
 
+  /// Completion time (Unix seconds), from taskchampion's "end" property. Set when a
+  /// task is completed, cleared when it returns to pending. `None` for pending tasks.
+  final PlatformInt64? endUnix;
+
   const TaskSummary({
     required this.uuid,
     required this.description,
     this.project,
     this.dueUnix,
     required this.status,
+    this.endUnix,
   });
 
   @override
@@ -86,7 +95,8 @@ class TaskSummary {
       description.hashCode ^
       project.hashCode ^
       dueUnix.hashCode ^
-      status.hashCode;
+      status.hashCode ^
+      endUnix.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -97,5 +107,6 @@ class TaskSummary {
           description == other.description &&
           project == other.project &&
           dueUnix == other.dueUnix &&
-          status == other.status;
+          status == other.status &&
+          endUnix == other.endUnix;
 }

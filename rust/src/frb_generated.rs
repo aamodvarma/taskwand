@@ -71,13 +71,18 @@ fn wire__crate__api__tasks__add_task_impl(
             let api_description = <String>::sse_decode(&mut deserializer);
             let api_project = <Option<String>>::sse_decode(&mut deserializer);
             let api_due_unix = <Option<i64>>::sse_decode(&mut deserializer);
+            let api_due_time_minutes = <Option<i32>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::tasks::add_task(api_description, api_project, api_due_unix)
-                                .await?;
+                        let output_ok = crate::api::tasks::add_task(
+                            api_description,
+                            api_project,
+                            api_due_unix,
+                            api_due_time_minutes,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -285,6 +290,7 @@ fn wire__crate__api__tasks__modify_task_impl(
             let api_description = <String>::sse_decode(&mut deserializer);
             let api_project = <Option<String>>::sse_decode(&mut deserializer);
             let api_due_unix = <Option<i64>>::sse_decode(&mut deserializer);
+            let api_due_time_minutes = <Option<i32>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
@@ -294,6 +300,7 @@ fn wire__crate__api__tasks__modify_task_impl(
                             api_description,
                             api_project,
                             api_due_unix,
+                            api_due_time_minutes,
                         )
                         .await?;
                         Ok(output_ok)
@@ -442,6 +449,13 @@ impl SseDecode for bool {
     }
 }
 
+impl SseDecode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -484,6 +498,17 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<i32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<i32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<i64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -503,12 +528,14 @@ impl SseDecode for crate::api::tasks::TaskSummary {
         let mut var_project = <Option<String>>::sse_decode(deserializer);
         let mut var_dueUnix = <Option<i64>>::sse_decode(deserializer);
         let mut var_status = <String>::sse_decode(deserializer);
+        let mut var_endUnix = <Option<i64>>::sse_decode(deserializer);
         return crate::api::tasks::TaskSummary {
             uuid: var_uuid,
             description: var_description,
             project: var_project,
             due_unix: var_dueUnix,
             status: var_status,
+            end_unix: var_endUnix,
         };
     }
 }
@@ -523,13 +550,6 @@ impl SseDecode for u8 {
 impl SseDecode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
-}
-
-impl SseDecode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
-    }
 }
 
 fn pde_ffi_dispatcher_primary_impl(
@@ -578,6 +598,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::tasks::TaskSummary {
             self.project.into_into_dart().into_dart(),
             self.due_unix.into_into_dart().into_dart(),
             self.status.into_into_dart().into_dart(),
+            self.end_unix.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -612,6 +633,13 @@ impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
     }
 }
 
@@ -652,6 +680,16 @@ impl SseEncode for Option<String> {
     }
 }
 
+impl SseEncode for Option<i32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <i32>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<i64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -670,6 +708,7 @@ impl SseEncode for crate::api::tasks::TaskSummary {
         <Option<String>>::sse_encode(self.project, serializer);
         <Option<i64>>::sse_encode(self.due_unix, serializer);
         <String>::sse_encode(self.status, serializer);
+        <Option<i64>>::sse_encode(self.end_unix, serializer);
     }
 }
 
@@ -683,13 +722,6 @@ impl SseEncode for u8 {
 impl SseEncode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
-}
-
-impl SseEncode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
-    }
 }
 
 #[cfg(not(target_family = "wasm"))]
