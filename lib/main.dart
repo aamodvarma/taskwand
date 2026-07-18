@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:taskwand/notifications.dart';
 import 'package:taskwand/src/rust/api/tasks.dart';
 import 'package:taskwand/src/rust/frb_generated.dart';
 
@@ -87,21 +88,48 @@ DateTime? _dueLocal(TaskSummary t) => t.dueUnix == null
     ? null
     : DateTime.fromMillisecondsSinceEpoch(t.dueUnix! * 1000);
 
+/// Completion time (local) for a completed task, or null if not completed / unknown.
+DateTime? _endLocal(TaskSummary t) => t.endUnix == null
+    ? null
+    : DateTime.fromMillisecondsSinceEpoch(t.endUnix! * 1000);
+
+/// A completed task counts as "recent" for 24h after completion. Recent tasks stay
+/// in the list (crossed out, restorable) even when completed tasks are hidden.
+bool _completedRecently(TaskSummary t) {
+  if (t.status != 'completed') return false;
+  final end = _endLocal(t);
+  if (end == null) return false;
+  return DateTime.now().difference(end) <= const Duration(hours: 24);
+}
+
 int _dateToUnix(DateTime d) =>
     DateTime(d.year, d.month, d.day).millisecondsSinceEpoch ~/ 1000;
 
-/// Human-friendly relative label for a due date (Today / Tomorrow / weekday / date).
+/// Minutes past local midnight for a due timestamp (0..1439).
+int _minutesOfDay(DateTime d) => d.hour * 60 + d.minute;
+
+/// Human-friendly relative label for a due date, with the time of day appended
+/// (e.g. "Today · 23:59").
 String _formatDue(DateTime due) {
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
   final d = DateTime(due.year, due.month, due.day);
   final diff = d.difference(today).inDays;
-  if (diff == 0) return 'Today';
-  if (diff == 1) return 'Tomorrow';
-  if (diff == -1) return 'Yesterday';
-  if (diff > 1 && diff < 7) return DateFormat('EEEE').format(due);
-  if (due.year == now.year) return DateFormat('MMM d').format(due);
-  return DateFormat('MMM d, y').format(due);
+  final String day;
+  if (diff == 0) {
+    day = 'Today';
+  } else if (diff == 1) {
+    day = 'Tomorrow';
+  } else if (diff == -1) {
+    day = 'Yesterday';
+  } else if (diff > 1 && diff < 7) {
+    day = DateFormat('EEEE').format(due);
+  } else if (due.year == now.year) {
+    day = DateFormat('MMM d').format(due);
+  } else {
+    day = DateFormat('MMM d, y').format(due);
+  }
+  return '$day · ${DateFormat('HH:mm').format(due)}';
 }
 
 // ---- main screen ------------------------------------------------------------
@@ -148,6 +176,7 @@ class _TaskListScreenState extends State<TaskListScreen>
     if (!dbDir.existsSync()) dbDir.createSync(recursive: true);
 
     await openReplica(dir: dbDir.path);
+    await NotificationService.instance.init();
     _settings = await loadSettings();
     await _reload();
     setState(() => _initialized = true);
@@ -156,8 +185,37 @@ class _TaskListScreenState extends State<TaskListScreen>
   }
 
   Future<void> _reload() async {
-    final tasks = await listTasks(includeCompleted: _showCompleted);
+    // Always fetch completed tasks: recently-completed ones (≤24h) stay in the
+    // list regardless of the "show completed" toggle — see [_visibleTasks].
+    final tasks = await listTasks(includeCompleted: true);
     if (mounted) setState(() => _tasks = tasks);
+    await _reconcileAlarms(tasks);
+  }
+
+  /// Keep the OS reminders in sync with the task list: (re)schedule a reminder for
+  /// every pending, due-dated task the user enabled it for; cancel it once the task
+  /// is completed or loses its due date. Also drops reminders for tasks that no
+  /// longer exist (e.g. deleted on another device).
+  Future<void> _reconcileAlarms(List<TaskSummary> tasks) async {
+    final svc = NotificationService.instance;
+    final present = <String>{};
+    for (final t in tasks) {
+      present.add(t.uuid);
+      if (!svc.isEnabled(t.uuid)) continue;
+      final due = _dueLocal(t);
+      if (t.status == 'pending' && due != null) {
+        await svc.schedule(
+            uuid: t.uuid, description: t.description, due: due);
+      } else {
+        await svc.cancel(t.uuid);
+      }
+    }
+    for (final uuid in svc.enabledUuids) {
+      if (!present.contains(uuid)) {
+        await svc.cancel(uuid);
+        await svc.setEnabled(uuid, false);
+      }
+    }
   }
 
   Future<void> _syncAndReload() async {
@@ -199,6 +257,11 @@ class _TaskListScreenState extends State<TaskListScreen>
     final todayStart = DateTime(now.year, now.month, now.day);
     final tomorrowStart = todayStart.add(const Duration(days: 1));
     bool matches(TaskSummary t) {
+      // Completed tasks: recently-completed ones always stay (crossed out); older
+      // ones show only when the "show completed" toggle is on.
+      if (t.status == 'completed' && !_showCompleted && !_completedRecently(t)) {
+        return false;
+      }
       final due = _dueLocal(t);
       switch (_filter) {
         case DateFilter.all:
@@ -235,6 +298,8 @@ class _TaskListScreenState extends State<TaskListScreen>
   }
 
   Future<void> _deleteTask(String uuid, {bool alreadyRemoved = false}) async {
+    await NotificationService.instance.cancel(uuid);
+    await NotificationService.instance.setEnabled(uuid, false);
     try {
       await deleteTask(uuid: uuid);
     } catch (e) {
@@ -268,18 +333,31 @@ class _TaskListScreenState extends State<TaskListScreen>
 
     try {
       if (existing == null) {
+        // Rust generates the uuid; diff the task list before/after to find it, so
+        // the reminder flag can be attached to the new task.
+        final before = _tasks.map((t) => t.uuid).toSet();
         await addTask(
           description: result.description,
           project: result.project,
           dueUnix: result.dueUnix,
+          dueTimeMinutes: result.dueMinutes,
         );
+        final after = await listTasks(includeCompleted: true);
+        final newUuid = after
+            .firstWhere((t) => !before.contains(t.uuid),
+                orElse: () => after.first)
+            .uuid;
+        await NotificationService.instance.setEnabled(newUuid, result.alarm);
       } else {
         await modifyTask(
           uuid: existing.uuid,
           description: result.description,
           project: result.project,
           dueUnix: result.dueUnix,
+          dueTimeMinutes: result.dueMinutes,
         );
+        await NotificationService.instance
+            .setEnabled(existing.uuid, result.alarm);
       }
     } catch (e) {
       _snack('Error: $e');
@@ -498,6 +576,15 @@ class _TaskTile extends StatelessWidget {
                   children: subtitleChildren,
                 ),
               ),
+        // Completed tasks stay visible but crossed out; offer a one-tap restore
+        // back to pending (same action as unchecking the box).
+        trailing: completed
+            ? IconButton(
+                icon: const Icon(Icons.undo),
+                tooltip: 'Restore',
+                onPressed: onToggle,
+              )
+            : null,
       ),
     );
   }
@@ -567,12 +654,19 @@ class EditorResult {
   final String description;
   final String? project;
   final int? dueUnix;
+  final int? dueMinutes;
+
+  /// Whether the user asked for a reminder 30 minutes before the due time.
+  /// Only meaningful when a due date is set.
+  final bool alarm;
 
   const EditorResult({
     this.delete = false,
     this.description = '',
     this.project,
     this.dueUnix,
+    this.dueMinutes,
+    this.alarm = false,
   });
 }
 
@@ -587,7 +681,12 @@ class TaskEditorSheet extends StatefulWidget {
 class _TaskEditorSheetState extends State<TaskEditorSheet> {
   late final TextEditingController _descCtrl;
   late final TextEditingController _projectCtrl;
+  // Date component (local midnight, Unix seconds) and time-of-day (minutes past
+  // midnight) are tracked separately so the time picker can be optional.
   int? _dueUnix;
+  int? _dueMinutes;
+  // Whether a reminder 30 min before due is enabled (device-local flag).
+  bool _alarm = false;
 
   @override
   void initState() {
@@ -595,7 +694,27 @@ class _TaskEditorSheetState extends State<TaskEditorSheet> {
     final e = widget.existing;
     _descCtrl = TextEditingController(text: e?.description ?? '');
     _projectCtrl = TextEditingController(text: e?.project ?? '');
-    _dueUnix = e?.dueUnix;
+    // Split the stored due timestamp back into its date and time-of-day parts.
+    final due = e?.dueUnix;
+    if (due != null) {
+      final dt = DateTime.fromMillisecondsSinceEpoch(due * 1000);
+      _dueUnix = _dateToUnix(dt);
+      _dueMinutes = _minutesOfDay(dt);
+    }
+    if (e != null) _alarm = NotificationService.instance.isEnabled(e.uuid);
+  }
+
+  Future<void> _toggleAlarm(bool value) async {
+    // Request permission the moment the user opts in, so scheduling later works.
+    if (value) {
+      final ok = await NotificationService.instance.ensurePermissions();
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Notifications permission denied')),
+        );
+      }
+    }
+    if (mounted) setState(() => _alarm = value);
   }
 
   @override
@@ -618,6 +737,17 @@ class _TaskEditorSheetState extends State<TaskEditorSheet> {
     if (picked != null) setState(() => _dueUnix = _dateToUnix(picked));
   }
 
+  Future<void> _pickTime() async {
+    // Default the picker to the effective due time (23:59 when none is set yet).
+    final initial = _dueMinutes != null
+        ? TimeOfDay(hour: _dueMinutes! ~/ 60, minute: _dueMinutes! % 60)
+        : const TimeOfDay(hour: 23, minute: 59);
+    final picked = await showTimePicker(context: context, initialTime: initial);
+    if (picked != null) {
+      setState(() => _dueMinutes = picked.hour * 60 + picked.minute);
+    }
+  }
+
   void _save() {
     final desc = _descCtrl.text.trim();
     if (desc.isEmpty) return;
@@ -628,6 +758,10 @@ class _TaskEditorSheetState extends State<TaskEditorSheet> {
         description: desc,
         project: project.isEmpty ? null : project,
         dueUnix: _dueUnix,
+        // Only meaningful with a date; the Rust side defaults a null time to 23:59.
+        dueMinutes: _dueUnix == null ? null : _dueMinutes,
+        // A reminder only makes sense relative to a due date.
+        alarm: _dueUnix != null && _alarm,
       ),
     );
   }
@@ -717,7 +851,10 @@ class _TaskEditorSheetState extends State<TaskEditorSheet> {
                   IconButton(
                     icon: const Icon(Icons.clear, size: 20),
                     tooltip: 'Clear',
-                    onPressed: () => setState(() => _dueUnix = null),
+                    onPressed: () => setState(() {
+                      _dueUnix = null;
+                      _dueMinutes = null;
+                    }),
                   ),
                 TextButton(
                   onPressed: _pickDate,
@@ -726,6 +863,55 @@ class _TaskEditorSheetState extends State<TaskEditorSheet> {
               ],
             ),
           ),
+          if (due != null) ...[
+            const SizedBox(height: 12),
+            InputDecorator(
+              decoration: const InputDecoration(
+                labelText: 'Due time',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.schedule_outlined),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _dueMinutes != null
+                          ? TimeOfDay(
+                                  hour: _dueMinutes! ~/ 60,
+                                  minute: _dueMinutes! % 60)
+                              .format(context)
+                          : '23:59 (end of day)',
+                      style: _dueMinutes == null
+                          ? TextStyle(color: theme.colorScheme.onSurfaceVariant)
+                          : null,
+                    ),
+                  ),
+                  if (_dueMinutes != null)
+                    IconButton(
+                      icon: const Icon(Icons.clear, size: 20),
+                      tooltip: 'Reset to end of day',
+                      onPressed: () => setState(() => _dueMinutes = null),
+                    ),
+                  TextButton(
+                    onPressed: _pickTime,
+                    child: Text(_dueMinutes != null ? 'Change' : 'Set'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (due != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: _alarm,
+                onChanged: (v) => _toggleAlarm(v ?? false),
+                title: const Text('Remind me 30 minutes before'),
+                secondary: const Icon(Icons.notifications_outlined),
+              ),
+            ),
           const SizedBox(height: 16),
           FilledButton(
             onPressed: _save,

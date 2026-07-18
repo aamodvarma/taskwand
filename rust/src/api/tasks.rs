@@ -14,6 +14,9 @@ pub struct TaskSummary {
     pub due_unix: Option<i64>,
     /// "pending" or "completed". Deleted/recurring/unknown tasks are never returned.
     pub status: String,
+    /// Completion time (Unix seconds), from taskchampion's "end" property. Set when a
+    /// task is completed, cleared when it returns to pending. `None` for pending tasks.
+    pub end_unix: Option<i64>,
 }
 
 fn status_str(status: &Status) -> &'static str {
@@ -53,6 +56,7 @@ pub async fn list_tasks(include_completed: bool) -> Result<Vec<TaskSummary>> {
             project: t.get_value("project").map(|s| s.to_string()),
             due_unix: t.get_due().map(|dt| dt.timestamp()),
             status: status_str(&t.get_status()).to_string(),
+            end_unix: t.get_timestamp("end").map(|dt| dt.timestamp()),
         })
         .collect();
     // Pending before completed; within each group, due-dated first (soonest first),
@@ -74,6 +78,7 @@ pub async fn add_task(
     description: String,
     project: Option<String>,
     due_unix: Option<i64>,
+    due_time_minutes: Option<i32>,
 ) -> Result<()> {
     let mut guard = REPLICA.lock().await;
     let replica = guard.as_mut().ok_or_else(|| anyhow!("replica not open"))?;
@@ -87,7 +92,7 @@ pub async fn add_task(
         &mut ops,
     )?;
     apply_project(&mut task, project, &mut ops)?;
-    task.set_due(due_unix.map(utc_timestamp), &mut ops)?;
+    task.set_due(due_timestamp(due_unix, due_time_minutes), &mut ops)?;
     replica.commit_operations(ops).await?;
     Ok(())
 }
@@ -99,6 +104,7 @@ pub async fn modify_task(
     description: String,
     project: Option<String>,
     due_unix: Option<i64>,
+    due_time_minutes: Option<i32>,
 ) -> Result<()> {
     let mut guard = REPLICA.lock().await;
     let replica = guard.as_mut().ok_or_else(|| anyhow!("replica not open"))?;
@@ -110,9 +116,25 @@ pub async fn modify_task(
     let mut ops = Operations::new();
     task.set_description(description, &mut ops)?;
     apply_project(&mut task, project, &mut ops)?;
-    task.set_due(due_unix.map(utc_timestamp), &mut ops)?;
+    task.set_due(due_timestamp(due_unix, due_time_minutes), &mut ops)?;
     replica.commit_operations(ops).await?;
     Ok(())
+}
+
+/// Combine a due date (`due_unix`, midnight of the day) with a time-of-day given
+/// as minutes past midnight (`due_time_minutes`). When a date is set but no time
+/// is supplied, the due time defaults to 23:59 (end of day). A `None` date clears
+/// the due entirely, regardless of the time.
+fn due_timestamp(
+    due_unix: Option<i64>,
+    due_time_minutes: Option<i32>,
+) -> Option<taskchampion::chrono::DateTime<taskchampion::chrono::Utc>> {
+    // 23:59 (end of day) when no explicit time is provided.
+    const DEFAULT_DUE_MINUTES: i32 = 23 * 60 + 59;
+    due_unix.map(|date| {
+        let minutes = due_time_minutes.unwrap_or(DEFAULT_DUE_MINUTES);
+        utc_timestamp(date + minutes as i64 * 60)
+    })
 }
 
 fn apply_project(
@@ -216,24 +238,30 @@ mod tests {
         assert!(list_tasks(false).await.unwrap().is_empty());
 
         // Add two tasks, one with a project and due date.
-        add_task("buy chalk".into(), None, None).await.unwrap();
-        add_task("write report".into(), Some("work".into()), Some(1_000_000))
-            .await
-            .unwrap();
+        add_task("buy chalk".into(), None, None, None).await.unwrap();
+        // Date at midnight with no explicit time defaults to 23:59 (86340s later).
+        add_task(
+            "write report".into(),
+            Some("work".into()),
+            Some(1_000_000),
+            None,
+        )
+        .await
+        .unwrap();
 
         let pending = list_tasks(false).await.unwrap();
         assert_eq!(pending.len(), 2);
         // Due-dated task sorts before the undated one.
         assert_eq!(pending[0].description, "write report");
         assert_eq!(pending[0].project.as_deref(), Some("work"));
-        assert_eq!(pending[0].due_unix, Some(1_000_000));
+        assert_eq!(pending[0].due_unix, Some(1_000_000 + 86340));
         assert_eq!(pending[0].status, "pending");
         assert_eq!(pending[1].description, "buy chalk");
         assert_eq!(pending[1].project, None);
 
         // Modify: change description, add a project, clear the due date.
         let uuid = pending[0].uuid.clone();
-        modify_task(uuid.clone(), "write final report".into(), Some("ops".into()), None)
+        modify_task(uuid.clone(), "write final report".into(), Some("ops".into()), None, None)
             .await
             .unwrap();
         let after = list_tasks(false).await.unwrap();
@@ -243,7 +271,7 @@ mod tests {
         assert_eq!(modified.due_unix, None);
 
         // Clearing a project via an empty string removes it.
-        modify_task(uuid.clone(), "write final report".into(), Some("  ".into()), None)
+        modify_task(uuid.clone(), "write final report".into(), Some("  ".into()), None, None)
             .await
             .unwrap();
         let after = list_tasks(false).await.unwrap();
