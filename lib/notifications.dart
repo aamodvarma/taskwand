@@ -127,7 +127,7 @@ class NotificationService {
           priority: Priority.high,
           category: AndroidNotificationCategory.reminder,
           enableVibration: true,
-          vibrationPattern: Int64List.fromList(<int>[0, 400, 200, 400]),
+          vibrationPattern: Int64List.fromList(<int>[0, 400, 200, 400, 200, 400, 0]),
         ),
         iOS: DarwinNotificationDetails(),
         macOS: DarwinNotificationDetails(),
