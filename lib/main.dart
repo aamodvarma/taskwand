@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:taskwand/notifications.dart';
+import 'package:taskwand/task_widget.dart';
 import 'package:taskwand/src/rust/api/tasks.dart';
 import 'package:taskwand/src/rust/frb_generated.dart';
 
@@ -190,6 +191,7 @@ class _TaskListScreenState extends State<TaskListScreen>
     final tasks = await listTasks(includeCompleted: true);
     if (mounted) setState(() => _tasks = tasks);
     await _reconcileAlarms(tasks);
+    await updateTaskWidget(tasks);
   }
 
   /// Keep the OS reminders in sync with the task list: (re)schedule a reminder for

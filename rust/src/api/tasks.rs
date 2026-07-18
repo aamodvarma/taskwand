@@ -60,16 +60,21 @@ pub async fn list_tasks(include_completed: bool) -> Result<Vec<TaskSummary>> {
         })
         .collect();
     // Pending before completed; within each group, due-dated first (soonest first),
-    // then undated alphabetically.
+    // then undated. `all_tasks()` returns a HashMap (unordered), so the comparator
+    // must be a total order to be deterministic: tie-break equal keys by description
+    // and finally by uuid.
     out.sort_by(|a, b| {
         let pa = a.status == "pending";
         let pb = b.status == "pending";
-        pb.cmp(&pa).then_with(|| match (a.due_unix, b.due_unix) {
-            (Some(x), Some(y)) => x.cmp(&y),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.description.cmp(&b.description),
-        })
+        pb.cmp(&pa)
+            .then_with(|| match (a.due_unix, b.due_unix) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a.description.cmp(&b.description))
+            .then_with(|| a.uuid.cmp(&b.uuid))
     });
     Ok(out)
 }
