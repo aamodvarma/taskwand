@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,7 +20,9 @@ class NotificationService {
   NotificationService._();
   static final NotificationService instance = NotificationService._();
 
-  static const _channelId = 'task_reminders';
+  // Bump the suffix when changing channel-level settings (vibration, importance):
+  // Android locks a channel's config once created, so a new id is needed to apply.
+  static const _channelId = 'task_reminders_v2';
   static const _prefsKey = 'alarm_task_uuids';
 
   final FlutterLocalNotificationsPlugin _plugin =
@@ -114,7 +118,7 @@ class NotificationService {
       body: 'Due in ${kReminderLead.inMinutes} minutes',
       scheduledDate: tz.TZDateTime.from(fireAt, tz.local),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      notificationDetails: const NotificationDetails(
+      notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
           _channelId,
           'Task reminders',
@@ -122,6 +126,8 @@ class NotificationService {
           importance: Importance.high,
           priority: Priority.high,
           category: AndroidNotificationCategory.reminder,
+          enableVibration: true,
+          vibrationPattern: Int64List.fromList(<int>[0, 400, 200, 400]),
         ),
         iOS: DarwinNotificationDetails(),
         macOS: DarwinNotificationDetails(),
