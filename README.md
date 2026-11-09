@@ -1,17 +1,35 @@
-# taskwand
+# TaskWand
 
-A new Flutter project.
+Minimal Android [Taskwarrior](https://taskwarrior.org) client built with Flutter and the [TaskChampion](https://github.com/GothenburgBitFactory/taskchampion) Rust crate.
 
-## Getting Started
+- Local SQLite replica, works offline
+- Syncs with a self-hosted `taskchampion-sync-server` (client ID + encryption secret), compatible with Taskwarrior 3.x
+- Due dates, reminders, date filters, undo
+- Home-screen widget
 
-This project is a starting point for a Flutter application.
+## Build
 
-A few resources to get you started if this is your first Flutter project:
+Requires Flutter and a Rust toolchain.
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```sh
+flutter pub get
+flutter run                 # device or Linux desktop
+flutter build apk --debug
+cd rust && cargo test       # bridge crate tests
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Regenerate bindings after editing `rust/src/api/`:
+
+```sh
+flutter_rust_bridge_codegen generate
+```
+
+## Layout
+
+- `lib/` – Flutter UI
+- `rust/src/api/tasks.rs` – TaskChampion bridge
+- `HANDOFF.md` – detailed notes
+
+## Setup
+
+Open settings in the app and enter the sync server URL, client ID and secret.
