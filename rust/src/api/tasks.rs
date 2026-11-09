@@ -309,5 +309,13 @@ mod tests {
             .unwrap()
             .iter()
             .all(|t| t.uuid != uuid));
+
+        // Undo of a delete: setting a deleted task back to pending restores it (the
+        // app's undo relies on deleted tasks remaining in the replica).
+        uncomplete_task(uuid.clone()).await.unwrap();
+        let restored = list_tasks(false).await.unwrap();
+        let t = restored.iter().find(|t| t.uuid == uuid).unwrap();
+        assert_eq!(t.status, "pending");
+        assert_eq!(t.description, "write final report");
     }
 }

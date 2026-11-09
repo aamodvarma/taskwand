@@ -133,6 +133,20 @@ String _formatDue(DateTime due) {
   return '$day · ${DateFormat('HH:mm').format(due)}';
 }
 
+// ---- undo -------------------------------------------------------------------
+
+/// One reversible user action. [revert] applies the inverse operation as a new
+/// change (rather than rolling back replica history), so it stays valid after the
+/// original change has already been synced.
+class _UndoEntry {
+  final String label;
+  final Future<void> Function() revert;
+  const _UndoEntry(this.label, this.revert);
+}
+
+/// Cap on remembered actions; older ones are dropped.
+const _maxUndo = 50;
+
 // ---- main screen ------------------------------------------------------------
 
 class TaskListScreen extends StatefulWidget {
@@ -150,6 +164,8 @@ class _TaskListScreenState extends State<TaskListScreen>
   bool _showCompleted = false;
   DateFilter _filter = DateFilter.all;
   Settings _settings = const Settings(serverUrl: '', clientId: '', secret: '');
+  final List<_UndoEntry> _undoStack = [];
+  bool _undoing = false;
 
   @override
   void initState() {
@@ -284,13 +300,43 @@ class _TaskListScreenState extends State<TaskListScreen>
     return _tasks.where(matches).toList();
   }
 
+  void _pushUndo(_UndoEntry entry) {
+    setState(() {
+      _undoStack.add(entry);
+      if (_undoStack.length > _maxUndo) _undoStack.removeAt(0);
+    });
+  }
+
+  Future<void> _undo() async {
+    if (_undoStack.isEmpty || _undoing) return;
+    final entry = _undoStack.last;
+    setState(() {
+      _undoStack.removeLast();
+      _undoing = true;
+    });
+    try {
+      await entry.revert();
+      _snack('Undone: ${entry.label}');
+    } catch (e) {
+      _snack('Undo failed: $e');
+    } finally {
+      if (mounted) setState(() => _undoing = false);
+    }
+    await _reload();
+    _backgroundSync();
+  }
+
   Future<void> _toggleComplete(TaskSummary task) async {
     final completing = task.status == 'pending';
+    final uuid = task.uuid;
     try {
       if (completing) {
-        await completeTask(uuid: task.uuid);
+        await completeTask(uuid: uuid);
+        _pushUndo(_UndoEntry(
+            'complete', () => uncompleteTask(uuid: uuid)));
       } else {
-        await uncompleteTask(uuid: task.uuid);
+        await uncompleteTask(uuid: uuid);
+        _pushUndo(_UndoEntry('restore', () => completeTask(uuid: uuid)));
       }
     } catch (e) {
       _snack('Error: $e');
@@ -299,9 +345,14 @@ class _TaskListScreenState extends State<TaskListScreen>
     _backgroundSync();
   }
 
-  Future<void> _deleteTask(String uuid, {bool alreadyRemoved = false}) async {
-    await NotificationService.instance.cancel(uuid);
-    await NotificationService.instance.setEnabled(uuid, false);
+  Future<void> _deleteTask(TaskSummary task,
+      {bool alreadyRemoved = false}) async {
+    final uuid = task.uuid;
+    final svc = NotificationService.instance;
+    final hadAlarm = svc.isEnabled(uuid);
+    final wasCompleted = task.status == 'completed';
+    await svc.cancel(uuid);
+    await svc.setEnabled(uuid, false);
     try {
       await deleteTask(uuid: uuid);
     } catch (e) {
@@ -309,9 +360,22 @@ class _TaskListScreenState extends State<TaskListScreen>
       await _reload();
       return;
     }
+    // Deleted tasks stay in the replica (status = deleted), so setting the status
+    // back to pending brings it back; re-complete it if that's what it was.
+    _pushUndo(_UndoEntry('delete', () async {
+      await uncompleteTask(uuid: uuid);
+      if (wasCompleted) await completeTask(uuid: uuid);
+      await svc.setEnabled(uuid, hadAlarm);
+    }));
     if (!alreadyRemoved) await _reload();
     _backgroundSync();
-    _snack('Task deleted');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: const Text('Task deleted'),
+        action: SnackBarAction(label: 'Undo', onPressed: _undo),
+      ));
   }
 
   Future<void> _toggleShowCompleted() async {
@@ -329,10 +393,11 @@ class _TaskListScreenState extends State<TaskListScreen>
     if (result == null || !mounted) return;
 
     if (result.delete && existing != null) {
-      await _deleteTask(existing.uuid);
+      await _deleteTask(existing);
       return;
     }
 
+    final svc = NotificationService.instance;
     try {
       if (existing == null) {
         // Rust generates the uuid; diff the task list before/after to find it, so
@@ -345,21 +410,42 @@ class _TaskListScreenState extends State<TaskListScreen>
           dueTimeMinutes: result.dueMinutes,
         );
         final after = await listTasks(includeCompleted: true);
-        final newUuid = after
-            .firstWhere((t) => !before.contains(t.uuid),
-                orElse: () => after.first)
-            .uuid;
-        await NotificationService.instance.setEnabled(newUuid, result.alarm);
+        final added = after.where((t) => !before.contains(t.uuid));
+        final newUuid =
+            added.isNotEmpty ? added.first.uuid : after.first.uuid;
+        await svc.setEnabled(newUuid, result.alarm);
+        // Only offer undo when the new task was identified unambiguously.
+        if (added.length == 1) {
+          _pushUndo(_UndoEntry('add', () async {
+            await svc.cancel(newUuid);
+            await svc.setEnabled(newUuid, false);
+            await deleteTask(uuid: newUuid);
+          }));
+        }
       } else {
+        final uuid = existing.uuid;
+        final oldAlarm = svc.isEnabled(uuid);
         await modifyTask(
-          uuid: existing.uuid,
+          uuid: uuid,
           description: result.description,
           project: result.project,
           dueUnix: result.dueUnix,
           dueTimeMinutes: result.dueMinutes,
         );
-        await NotificationService.instance
-            .setEnabled(existing.uuid, result.alarm);
+        await svc.setEnabled(uuid, result.alarm);
+        // Restore the previous fields; the due timestamp is split back into the
+        // date + time-of-day form modifyTask expects.
+        final oldDue = _dueLocal(existing);
+        _pushUndo(_UndoEntry('edit', () async {
+          await modifyTask(
+            uuid: uuid,
+            description: existing.description,
+            project: existing.project,
+            dueUnix: oldDue == null ? null : _dateToUnix(oldDue),
+            dueTimeMinutes: oldDue == null ? null : _minutesOfDay(oldDue),
+          );
+          await svc.setEnabled(uuid, oldAlarm);
+        }));
       }
     } catch (e) {
       _snack('Error: $e');
@@ -388,6 +474,13 @@ class _TaskListScreenState extends State<TaskListScreen>
       appBar: AppBar(
         title: const Text('Tasks'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.undo),
+            onPressed: _undoStack.isEmpty || _undoing ? null : _undo,
+            tooltip: _undoStack.isEmpty
+                ? 'Nothing to undo'
+                : 'Undo ${_undoStack.last.label}',
+          ),
           if (_syncing)
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16),
@@ -445,10 +538,10 @@ class _TaskListScreenState extends State<TaskListScreen>
                         onToggle: () => _toggleComplete(visible[i]),
                         onTap: () => _openEditor(existing: visible[i]),
                         onDismissed: () {
-                          final uuid = visible[i].uuid;
-                          setState(
-                              () => _tasks.removeWhere((t) => t.uuid == uuid));
-                          _deleteTask(uuid, alreadyRemoved: true);
+                          final task = visible[i];
+                          setState(() =>
+                              _tasks.removeWhere((t) => t.uuid == task.uuid));
+                          _deleteTask(task, alreadyRemoved: true);
                         },
                       ),
                     ),
